@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <title>Salida rápida por SKU</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <style>
+    body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; background:#f6f8fa; color:#24292e; margin:20px;}
+    label {display:block;margin-top:10px;}
+    input[type="text"],input[type="number"],input[type="date"] {width:100%;padding:5px;margin:5px 0 10px 0;border:1px solid #d1d5da;border-radius:4px;}
+    button {background:#2ea44f;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:15px;}
+    button:disabled {background:#d1d5da;}
+    #resultadoUbicaciones {margin:15px 0;}
+    .remove-btn {background:#dc3545;padding:2px 8px;font-size:13px;border-radius:4px;}
+    .row-flex {display:flex;gap:10px;}
+    .sku-row {margin-bottom:8px;}
+    .add-btn {background:#0366d6;}
+    .autocomplete-container { position: relative; flex:2;}
+    .sugerencias-dropdown {
+      position: absolute;
+      top:38px;
+      left:0;
+      background: #fff;
+      border: 1px solid #d1d5da;
+      border-radius: 4px;
+      z-index: 10;
+      max-height: 180px;
+      overflow-y: auto;
+      width: 100%;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.08);
+    }
+    .sugerencia-item {
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size:14px;
+    }
+    .sugerencia-item:hover, .sugerencia-item.selected {
+      background: #0366d6;
+      color: #fff;
+    }
+    .desc-readonly {
+      background: #e9ecef;
+      border: 1px solid #d1d5da;
+      border-radius: 4px;
+      color: #495057;
+      padding: 4px 8px;
+      font-size: 90%;
+      margin-top: 1px;
+      margin-bottom: 0;
+      letter-spacing: 0.05em;
+    }
+    .error-cant {border:2px solid #dc3545;}
+    .error-msg {color:#dc3545;font-weight:bold;}
+    .error-duplicado {color:#dc3545;font-size:90%;margin:-6px 0 6px 0;}
+    .error-cant-msg {color:#dc3545;font-size:90%;margin:-6px 0 6px 0;}
+  </style>
+</head>
+<body>
+  <h2>Seleeciona productos para picking</h2>
+  <form id="retiroForm" onsubmit="return false;">
+    <div>
+      <label>Fecha:
+        <input type="date" id="fecha" required>
+      </label>
+      <label>N° Documento:
+        <input type="text" id="documento" required placeholder="N° documento">
+      </label>
+    </div>
+    <div id="skuContainer"></div>
+    <button type="button" class="add-btn" onclick="agregarFila()">+ Agregar otro SKU</button>
+    <br><br>
+    <button type="button" onclick="buscarUbicaciones()">Buscar ubicaciones</button>
+  </form>
+  <div id="resultadoUbicaciones"></div>
+  <button type="button" onclick="confirmarSalida()" style="display:none;" id="confirmarBtn">Confirmar y guardar salida</button>
+  <button type="button" onclick="imprimirRuta()" style="display:none;" id="imprimirBtn">Imprimir ruta</button>
+  <script>
+    // --- CACHE Y DEBOUNCE ---
+    let sugerenciasGlobales = [];
+    const debouncedBuscarSugerencias = [];
+
+    // --- LÓGICA ORIGINAL ---
+    let filas = [];
+    let resultadoBusqueda = null;
+    let erroresCantidad = [];
+    let sugerenciasPorFila = [];
+    let seleccionActualPorFila = [];
+    let ultimaBusquedaDatos = "";
+    let errorDuplicadoPorFila = [];
+
+    function debounce(fn, delay) {
+      let timer = null;
+      return function(...args) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), delay);
+      };
+    }
+
+    function todayStr() {
+      const d = new Date();
+      return d.toISOString().split('T')[0];
+    }
+    document.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("fecha").value = todayStr();
+      google.script.run.withSuccessHandler(function(sugs){
+        sugerenciasGlobales = sugs;
+      }).obtenerTodosLosSKUS();
+      agregarFila();
+    });
+
+    function agregarFila() {
+      const idx = filas.length;
+      const div = document.createElement('div');
+      div.className = "sku-row row-flex";
+      div.innerHTML = `
+        <div class="autocomplete-container">
+          <input type="text" placeholder="SKU o descripción" required id="sku${idx}" autocomplete="off"
+            oninput="buscarSugerenciasSKUDescripcionGS(this.value,${idx});inputModificado();validarDuplicados(${idx});"
+            onkeydown="navegacionSugerenciasFila(event,${idx})"
+            style="flex:2">
+          <div id="sugerenciasSKU${idx}" class="sugerencias-dropdown"></div>
+          <div id="desc${idx}" class="desc-readonly"></div>
+          <div id="errorDuplicado${idx}" class="error-duplicado"></div>
+        </div>
+        <div style="flex:0.6;max-width:110px;">
+          <input type="number" placeholder="Cantidad" min="1" required id="cantidad${idx}" style="width:80px;" oninput="inputModificado();validarCantidadFila(${idx});">
+          <div id="errorCantidad${idx}" class="error-cant-msg"></div>
+        </div>
+        <button type="button" class="remove-btn" onclick="eliminarFila(${idx})">x</button>
+      `;
+      document.getElementById('skuContainer').appendChild(div);
+      filas.push(div);
+      sugerenciasPorFila[idx] = [];
+      seleccionActualPorFila[idx] = 0;
+      errorDuplicadoPorFila[idx] = false;
+      actualizarRemovibles();
+    }
+
+    function eliminarFila(idx) {
+      if (filas.length === 1) return Swal.fire('Debe haber al menos una fila');
+      filas[idx].remove();
+      filas[idx] = null;
+      filas = filas.filter(f=>f);
+      sugerenciasPorFila = sugerenciasPorFila.filter((_,i)=>filas[i]);
+      seleccionActualPorFila = seleccionActualPorFila.filter((_,i)=>filas[i]);
+      errorDuplicadoPorFila = errorDuplicadoPorFila.filter((_,i)=>filas[i]);
+      actualizarRemovibles();
+      inputModificado();
+    }
+
+    function actualizarRemovibles() {
+      document.querySelectorAll('.remove-btn').forEach(btn => btn.disabled = (filas.length === 1));
+    }
+
+    // --- AUTOCOMPLETADO MEJORADO ---
+    function buscarSugerenciasSKUDescripcionGS(query, idx) {
+      if (sugerenciasGlobales.length > 0 && query.length >= 1) {
+        let fil = sugerenciasGlobales.filter(item =>
+          item.sku.toLowerCase().includes(query.toLowerCase()) ||
+          item.descripcion.toLowerCase().includes(query.toLowerCase())
+        ).slice(0, 20); // máx 20 sugerencias
+        sugerenciasPorFila[idx] = fil;
+        let html = "";
+        fil.forEach((item, j) => {
+          html += `<div class="sugerencia-item" onclick="seleccionarSugerenciaFila(${idx},${j})">
+            <b>${item.sku}</b> - ${item.descripcion} <span style='color:#888'>[Stock: ${item.cantidad}]</span>
+          </div>`;
+        });
+        document.getElementById(`sugerenciasSKU${idx}`).innerHTML = html;
+      } else {
+        // Si no hay cache, usa remoto con debounce
+        if (!debouncedBuscarSugerencias[idx]) {
+          debouncedBuscarSugerencias[idx] = debounce(function(query, idx) {
+            document.getElementById(`sugerenciasSKU${idx}`).innerHTML = "<div style='padding:8px;'>Buscando...</div>";
+            google.script.run
+              .withSuccessHandler(function(sugerencias) {
+                sugerenciasPorFila[idx] = sugerencias;
+                let html = "";
+                sugerencias.forEach((item, j) => {
+                  html += `<div class="sugerencia-item" onclick="seleccionarSugerenciaFila(${idx},${j})">
+                    <b>${item.sku}</b> - ${item.descripcion} <span style='color:#888'>[Stock: ${item.cantidad}]</span>
+                  </div>`;
+                });
+                document.getElementById(`sugerenciasSKU${idx}`).innerHTML = html;
+              })
+              .buscarSugerenciasSKUDescripcion(query);
+          }, 350);
+        }
+        debouncedBuscarSugerencias[idx](query, idx);
+      }
+    }
+
+    function navegacionSugerenciasFila(event, idx) {
+      if (!sugerenciasPorFila[idx] || !sugerenciasPorFila[idx].length) return;
+      if (event.key === "ArrowDown") {
+        seleccionActualPorFila[idx] = Math.min((seleccionActualPorFila[idx]||0) + 1, sugerenciasPorFila[idx].length - 1);
+        actualizarSeleccionEnDropdownFila(idx);
+        event.preventDefault();
+      } else if (event.key === "ArrowUp") {
+        seleccionActualPorFila[idx] = Math.max((seleccionActualPorFila[idx]||0) - 1, 0);
+        actualizarSeleccionEnDropdownFila(idx);
+        event.preventDefault();
+      } else if (event.key === "Enter" && (seleccionActualPorFila[idx]||0) >= 0) {
+        seleccionarSugerenciaFila(idx, seleccionActualPorFila[idx]);
+        event.preventDefault();
+      }
+    }
+    function actualizarSeleccionEnDropdownFila(idx) {
+      const items = document.querySelectorAll(`#sugerenciasSKU${idx} .sugerencia-item`);
+      items.forEach((el, i) => {
+        el.classList.toggle('selected', i === (seleccionActualPorFila[idx]||0));
+      });
+    }
+    function seleccionarSugerenciaFila(idx, j) {
+      const sug = sugerenciasPorFila[idx][j];
+      document.getElementById(`sku${idx}`).value = sug.sku;
+      document.getElementById(`desc${idx}`).textContent = sug.descripcion + ` [Stock: ${sug.cantidad}]`;
+      document.getElementById(`sugerenciasSKU${idx}`).innerHTML = "";
+      seleccionActualPorFila[idx] = 0;
+      inputModificado();
+      validarDuplicados(idx);
+      validarCantidadFila(idx, sug.cantidad);
+    }
+    document.addEventListener("click", function(e) {
+      for(let idx=0; idx<filas.length; idx++) {
+        if (!document.getElementById(`sku${idx}`)) continue;
+        if (!document.getElementById(`sku${idx}`).contains(e.target)) {
+          document.getElementById(`sugerenciasSKU${idx}`).innerHTML = "";
+        }
+      }
+    });
+
+    function inputModificado() {
+      resultadoBusqueda = null;
+      document.getElementById('confirmarBtn').style.display = 'none';
+      document.getElementById('imprimirBtn').style.display = 'none';
+      document.getElementById('resultadoUbicaciones').innerHTML = '';
+      // Limpiar errores de cantidad de todas las filas
+      for (let i = 0; i < filas.length; i++) {
+        if (!filas[i]) continue;
+        document.getElementById(`errorCantidad${i}`).textContent = "";
+        filas[i].querySelector('input[type="number"]').classList.remove('error-cant');
+      }
+    }
+
+    function validarDuplicados(idx) {
+      // Limpia mensajes anteriores
+      document.getElementById(`errorDuplicado${idx}`).textContent = "";
+      errorDuplicadoPorFila[idx] = false;
+      const skus = [];
+      for (let i = 0; i < filas.length; i++) {
+        if (!filas[i]) continue;
+        const sku = filas[i].querySelector('input[type="text"]').value.trim();
+        skus.push(sku);
+      }
+      // Verifica duplicados (excepto si está vacío)
+      const actual = skus[idx];
+      if (actual && skus.filter(s => s === actual).length > 1) {
+        document.getElementById(`errorDuplicado${idx}`).textContent = "Este SKU ya ha sido seleccionado. Elija uno diferente.";
+        errorDuplicadoPorFila[idx] = true;
+      }
+    }
+
+    function validarCantidadFila(idx, stockSug) {
+      // Esta función se usará después de mostrarUbicaciones para mostrar faltantes en el formulario
+      const cantidadInput = filas[idx].querySelector('input[type="number"]');
+      cantidadInput.classList.remove('error-cant');
+      document.getElementById(`errorCantidad${idx}`).textContent = "";
+      // Solo muestra error si ya se hizo la búsqueda
+      if (resultadoBusqueda && resultadoBusqueda.resultados && resultadoBusqueda.resultados.length > idx) {
+        const res = resultadoBusqueda.resultados[idx];
+        if (res && !res.suficiente) {
+          cantidadInput.classList.add('error-cant');
+          document.getElementById(`errorCantidad${idx}`).textContent = `Faltante: ${res.cantidadFaltante} unidades. Corrija la cantidad.`;
+        }
+      }
+    }
+
+    function buscarUbicaciones() {
+      let datos = [];
+      erroresCantidad = [];
+      // Validar duplicados antes de buscar ubicaciones
+      let hayDuplicados = false;
+      for (let i=0; i<filas.length; i++) {
+        validarDuplicados(i);
+        if (errorDuplicadoPorFila[i]) hayDuplicados = true;
+      }
+      if (hayDuplicados) {
+        Swal.fire("Error","No puede haber SKUs repetidos. Corrija los errores antes de continuar.","error");
+        return;
+      }
+      for (let i=0; i<filas.length; i++) {
+        const fila = filas[i];
+        const sku = fila.querySelector('input[type="text"]').value.trim();
+        const cantidadInput = fila.querySelector('input[type="number"]');
+        const cantidad = parseInt(cantidadInput.value,10);
+        cantidadInput.classList.remove('error-cant');
+        document.getElementById(`errorCantidad${i}`).textContent = "";
+        if (!sku || !cantidad || cantidad<=0) {
+          Swal.fire("Error","Complete todos los SKUs y cantidades","error"); return;
+        }
+        datos.push({sku,cantidad});
+      }
+      ultimaBusquedaDatos = JSON.stringify(datos);
+      document.getElementById('resultadoUbicaciones').innerHTML = 'Buscando...';
+      google.script.run.withSuccessHandler(mostrarUbicaciones).buscarUbicacionesParaRetiroMultiple(datos);
+    }
+
+    function mostrarUbicaciones(respuesta) {
+      resultadoBusqueda = respuesta;
+      let todoOK = true;
+      let html = "<h3>Ubicaciones sugeridas:</h3>";
+      erroresCantidad = [];
+      respuesta.resultados.forEach((res, i) => {
+        const fila = filas[i];
+        const cantidadInput = fila.querySelector('input[type="number"]');
+        cantidadInput.classList.remove('error-cant');
+        // Limpiar mensajes de error de cantidad
+        document.getElementById(`errorCantidad${i}`).textContent = "";
+        html += `<b>SKU: ${res.sku}</b> (${res.detalle.length ? "" : "<span style='color:red'>Sin stock</span>"})<ul>`;
+        res.detalle.forEach(ub => {
+          html += `<li><b>${ub.ubicacion}</b>: ${ub.cantidad} unidades</li>`;
+        });
+        html += "</ul>";
+        // Mensaje de faltante de cantidad debajo del campo de cantidad
+        if (!res.suficiente) {
+          document.getElementById(`errorCantidad${i}`).textContent = `Faltante: ${res.cantidadFaltante} unidades. Corrija la cantidad.`;
+          cantidadInput.classList.add('error-cant');
+          erroresCantidad.push(i);
+          todoOK = false;
+        }
+      });
+      document.getElementById('resultadoUbicaciones').innerHTML = html;
+      document.getElementById('confirmarBtn').style.display = todoOK && respuesta.resultados.length>0 ? '' : 'none';
+      document.getElementById('imprimirBtn').style.display = todoOK && respuesta.resultados.length>0 ? '' : 'none';
+      if (!todoOK) {
+        Swal.fire("Error","Al menos una cantidad solicitada supera el stock actual. Corrija las cantidades marcadas en rojo.","error");
+      }
+    }
+
+    function confirmarSalida() {
+      var confirmarBtn = document.getElementById('confirmarBtn');
+      if (confirmarBtn.disabled) return;
+      confirmarBtn.disabled = true;
+
+      const fecha = document.getElementById('fecha').value;
+      const documento = document.getElementById('documento').value.trim();
+      if (!fecha || !documento) { 
+        Swal.fire("Error","Ingrese fecha y documento","error");
+        confirmarBtn.disabled = false;
+        return; 
+      }
+      let datosActuales = [];
+      for (let i=0; i<filas.length; i++) {
+        const fila = filas[i];
+        const sku = fila.querySelector('input[type="text"]').value.trim();
+        const cantidad = parseInt(fila.querySelector('input[type="number"]').value,10);
+        datosActuales.push({sku, cantidad});
+      }
+      // Validar duplicados antes de confirmar salida
+      let hayDuplicados = false;
+      for (let i=0; i<filas.length; i++) {
+        validarDuplicados(i);
+        if (errorDuplicadoPorFila[i]) hayDuplicados = true;
+      }
+      if (hayDuplicados) {
+        Swal.fire("Error","No puede haber SKUs repetidos. Corrija los errores antes de continuar.","error");
+        confirmarBtn.disabled = false;
+        return;
+      }
+      // Validar cantidades antes de confirmar salida
+      for (let i=0; i<filas.length; i++) {
+        validarCantidadFila(i);
+        if (document.getElementById(`errorCantidad${i}`).textContent !== "") {
+          Swal.fire("Error","Al menos una cantidad solicitada supera el stock actual. Corrija las cantidades marcadas en rojo.","error");
+          confirmarBtn.disabled = false;
+          return;
+        }
+      }
+      if (!resultadoBusqueda || ultimaBusquedaDatos !== JSON.stringify(datosActuales)) {
+        Swal.fire("Debe buscar ubicaciones y no cambiar nada antes de confirmar. Si modificó algún campo, haga clic en 'Buscar ubicaciones' otra vez.","","warning");
+        document.getElementById('confirmarBtn').style.display = 'none';
+        document.getElementById('imprimirBtn').style.display = 'none';
+        confirmarBtn.disabled = false;
+        return;
+      }
+      google.script.run.withSuccessHandler(function(resp) {
+        confirmarBtn.disabled = false;
+        Swal.fire("Salida registrada", resp.mensaje, "success");
+        document.getElementById('resultadoUbicaciones').innerHTML = '';
+        document.getElementById('confirmarBtn').style.display = 'none';
+        document.getElementById('imprimirBtn').style.display = 'none';
+      }).withFailureHandler(function() {
+        confirmarBtn.disabled = false;
+      }).registrarSalidaRapidaMultiple({
+        resultados: resultadoBusqueda.resultados,
+        fecha,
+        documento
+      });
+    }
+
+    function imprimirRuta() {
+      if (!resultadoBusqueda || !resultadoBusqueda.resultados || resultadoBusqueda.resultados.length === 0) {
+        Swal.fire("No hay datos para imprimir.", "", "info");
+        return;
+      }
+      // Obtener datos cabecera
+      const documento = document.getElementById('documento').value.trim();
+      // Obtener fecha y hora actual local
+      const now = new Date();
+      function pad(num){ return num.toString().padStart(2,'0'); }
+      const fechaImp = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+      // Armar HTML para impresión
+      let html = `
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 24px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #888; padding: 7px; }
+            th { background: #eee; }
+            .cabecera-oculta { display: none !important; }
+          </style>
+        </head>
+        <body>
+          <h2 class="cabecera-oculta">Ruta</h2>
+          <div style="margin-bottom:18px;font-size:15px;">
+            <b>Ruta</b>&nbsp;&nbsp;${fechaImp}&nbsp;&nbsp;&nbsp;N° Documento: ${documento}
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>Descripción</th>
+                <th>Ubicación</th>
+                <th>Cantidad</th>
+              </tr>
+            </thead>
+            <tbody>
+      `;
+
+      resultadoBusqueda.resultados.forEach(res => {
+        // Intentar obtener la descripción de la fila en pantalla
+        let desc = "";
+        for (let i = 0; i < filas.length; i++) {
+          const sku = filas[i].querySelector('input[type="text"]').value.trim();
+          if (sku === res.sku) {
+            desc = document.getElementById(`desc${i}`).textContent.replace(/\[.*?\]/, '').trim();
+            break;
+          }
+        }
+        if (res.detalle.length === 0) {
+          html += `<tr>
+            <td>${res.sku}</td>
+            <td>${desc}</td>
+            <td colspan="2" style="color:red;">Sin stock</td>
+          </tr>`;
+        } else {
+          res.detalle.forEach(ub => {
+            html += `<tr>
+              <td>${res.sku}</td>
+              <td>${desc}</td>
+              <td>${ub.ubicacion}</td>
+              <td>${ub.cantidad}</td>
+            </tr>`;
+          });
+        }
+      });
+
+      html += `
+            </tbody>
+          </table>
+          <script>window.print();<\/script>
+        </body>
+        </html>
+      `;
+
+      let w = window.open("", "_blank");
+      w.document.write(html);
+      w.document.close();
+    }
+  </script>
+</body>
+</html>

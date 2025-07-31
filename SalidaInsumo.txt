@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <title>Salida de Insumos</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <style>
+    body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; margin:20px; background:#f6f8fa; color:#24292e;}
+    .form-header { display: grid; grid-template-columns: repeat(2,1fr); gap: 20px; background:#fff; padding:20px; border:1px solid #d1d5da; border-radius:6px; margin-bottom:20px;}
+    .form-header > div { display: flex; flex-direction: column; justify-content: flex-start; }
+    .form-header label { margin-bottom: 4px; font-size: 14px; font-weight: normal; }
+    .footer-buttons { display:flex; gap:10px; align-items:center; margin-top: 14px;}
+    .footer-buttons button { background:#2ea44f; color:#fff; border:none; padding:10px 20px; border-radius:6px; cursor:pointer; font-size: 16px; height: 44px; min-width: 120px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; }
+    .footer-buttons button:hover { background:#2c974b; }
+    .add-row-button { background:#2ea44f; color:#fff; border:none; border-radius:50%; width:30px; height:30px; font-size:20px; cursor:pointer; display:flex; align-items:center; justify-content:center;}
+    .remove-row-button { background:#dc3545; color:#fff; border:none; border-radius:50%; width:20px; height:20px; font-size:14px; cursor:pointer;}
+    .table-container { max-height:300px; overflow-y:auto; margin-bottom:80px; border:1px solid #d1d5da; border-radius:6px; background:#fff; }
+    .data-table { width:100%; border-collapse:collapse;}
+    .data-table th, .data-table td { border:1px solid #e1e4e8; padding:4px; font-size:12px;}
+    .data-table th { background:#f6f8fa; font-weight:bold; text-align:center; padding:8px;}
+    input, select { width:100%; padding:4px; border:1px solid #d1d5da; border-radius:6px; font-size:12px; background:#fafbfc; color:#24292e; height:30px; box-sizing:border-box;}
+    .number-input { width:60px; }
+    .stock { background:#e1e4e8; pointer-events:none; }
+    .sku { background:#e1e4e8; pointer-events:none; }
+    .fixed-footer { 
+      display: flex; 
+      flex-direction: row;
+      align-items: center; 
+      justify-content: space-between; 
+      position: fixed; 
+      bottom: 0; 
+      left: 0; 
+      width: 100%; 
+      background: #fff; 
+      padding: 10px 20px; 
+      border-top: 1px solid #d1d5da;
+      box-sizing: border-box;
+      z-index: 10;
+    }
+    .footer-buttons { display:flex; gap:10px; align-items:center; }
+    .footer-buttons button { 
+      background:#2ea44f; 
+      color:#fff; 
+      border:none; 
+      padding:10px 20px; 
+      border-radius:6px; 
+      cursor:pointer;
+      font-size: 16px;
+      height: 44px;
+      min-width: 120px;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .footer-buttons button:hover { background:#2c974b; }
+    .footer-addrow-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .table-container {
+      margin-bottom: 110px;
+    }
+  </style>
+</head>
+<body>
+  <h2 style="font-size:18px;margin-top:0;">Selecciona insumos de descontar</h2>
+  <form id="formSalida">
+    <div class="form-header">
+      <div>
+        <label for="fecha">Fecha:</label>
+        <input type="date" id="fecha" required>
+      </div>
+      <div>
+        <label for="documento">Documento:</label>
+        <input type="text" id="documento" placeholder="N° documento" minlength="2" required>
+      </div>
+    </div>
+    <div class="table-container">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Descripción</th>
+            <th>SKU</th>
+            <th>Stock</th>
+            <th>Cantidad</th>
+            <th>Eliminar</th>
+          </tr>
+        </thead>
+        <tbody id="descuentosTableBody"></tbody>
+      </table>
+    </div>
+  </form>
+  <div class="fixed-footer">
+    <div class="footer-addrow-container">
+      <button type="button" class="add-row-button" onclick="agregarFila()">+</button>
+    </div>
+    <div class="footer-buttons">
+      <button type="submit" form="formSalida">Guardar</button>
+    </div>
+  </div>
+  <script>
+    let insumosData = []; // [{descripcion, sku, stock}]
+    let filas = [];
+
+    function establecerFechaActual() {
+      const hoy = new Date();
+      const yyyy = hoy.getFullYear();
+      const mm = String(hoy.getMonth() + 1).padStart(2, '0');
+      const dd = String(hoy.getDate()).padStart(2, '0');
+      document.getElementById('fecha').value = `${yyyy}-${mm}-${dd}`;
+    }
+
+    function cargarInsumos() {
+      google.script.run.withSuccessHandler(function(datos) {
+        insumosData = datos; // [{descripcion, sku, stock}]
+        filas.length = 0;
+        document.getElementById('descuentosTableBody').innerHTML = '';
+        agregarFila();
+      }).obtenerDescuentosInsumosData();
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      cargarInsumos();
+      establecerFechaActual();
+    });
+
+    function cargarDescripciones(select) {
+      // Guardar valor actual antes de recargar
+      const valorActual = select.value;
+      select.innerHTML = '<option value="" disabled selected>-- Selecciona insumo --</option>';
+      // Buscar descripciones seleccionadas en otras filas
+      const seleccionadas = Array.from(document.querySelectorAll('.descripcion'))
+        .filter(s => s !== select)
+        .map(s => s.value);
+
+      insumosData.forEach(item => {
+        // Si el valor es el seleccionado en esta fila, siempre lo incluimos (aunque esté ya en uso, porque es suya)
+        if (!seleccionadas.includes(item.descripcion) || item.descripcion === valorActual) {
+          const opt = document.createElement("option");
+          opt.value = item.descripcion;
+          opt.textContent = item.descripcion;
+          if (item.descripcion === valorActual) opt.selected = true;
+          select.appendChild(opt);
+        }
+      });
+    }
+
+    function agregarFila() {
+      const tbody = document.getElementById('descuentosTableBody');
+      const newRow = document.createElement('tr');
+      const index = filas.length;
+      newRow.innerHTML = `
+        <td>
+          <select class="descripcion" required>
+            <option value="" disabled selected>-- Selecciona insumo --</option>
+          </select>
+        </td>
+        <td>
+          <input type="text" class="sku" readonly>
+        </td>
+        <td>
+          <input type="text" class="stock" readonly>
+        </td>
+        <td>
+          <input type="number" class="cantidad number-input" min="1" required>
+        </td>
+        <td style="text-align:center;">
+          <button type="button" class="remove-row-button" onclick="eliminarFila(${index})">×</button>
+        </td>
+      `;
+      tbody.appendChild(newRow);
+      filas.push(newRow);
+
+      cargarDescripciones(newRow.querySelector('.descripcion'));
+
+      // Evento para cambio en descripción
+      newRow.querySelector('.descripcion').addEventListener('change', function() {
+        actualizarSKUYStock(this);
+        // Actualiza las opciones en las otras filas para evitar duplicados
+        document.querySelectorAll('.descripcion').forEach(s => {
+          if (s !== this) cargarDescripciones(s);
+        });
+      });
+    }
+
+    function eliminarFila(index) {
+      if (document.getElementById('descuentosTableBody').children.length > 1) {
+        filas[index].remove();
+        filas.splice(index, 1);
+        // Actualiza todas las listas desplegables para que la descripción vuelva a estar disponible
+        document.querySelectorAll('.descripcion').forEach(cargarDescripciones);
+      } else {
+        Swal.fire('Error', 'Debe mantener al menos una fila', 'error');
+      }
+    }
+
+    function actualizarSKUYStock(select) {
+      const fila = select.closest('tr');
+      const descripcionSeleccionada = select.value;
+      const skuInput = fila.querySelector('.sku');
+      const stockInput = fila.querySelector('.stock');
+      const cantidadInput = fila.querySelector('.cantidad');
+      const item = insumosData.find(i => i.descripcion === descripcionSeleccionada);
+      skuInput.value = item ? item.sku : '';
+      stockInput.value = item && item.stock ? item.stock : '';
+      cantidadInput.value = '';
+      cantidadInput.max = item && item.stock ? item.stock : '';
+      cantidadInput.oninput = function() {
+        if (item && Number(this.value) > Number(item.stock)) {
+          this.value = item.stock;
+          Swal.fire('Error', 'No puede descontar más que el stock disponible.', 'error');
+        }
+      };
+    }
+
+    document.getElementById('formSalida').onsubmit = function(e) {
+      e.preventDefault();
+      // Recolectar todas las filas
+      const descuentos = [];
+      let valido = true;
+      filas.forEach(fila => {
+        const descripcion = fila.querySelector('.descripcion').value;
+        const sku = fila.querySelector('.sku').value;
+        const stock = Number(fila.querySelector('.stock').value);
+        const cantidad = Number(fila.querySelector('.cantidad').value);
+        if (!descripcion || !sku || !cantidad || cantidad < 1) {
+          valido = false;
+        }
+        if (cantidad > stock) {
+          Swal.fire('Error', `No puede descontar más que el stock disponible para ${descripcion}.`, 'error');
+          valido = false;
+        }
+        descuentos.push({descripcion, sku, cantidad});
+      });
+
+      const datos = {
+        fecha: document.getElementById('fecha').value,
+        documento: document.getElementById('documento').value,
+        descuentos
+      };
+
+      if (!datos.fecha || !datos.documento || !descuentos.length || !valido) {
+        Swal.fire('Error', 'Complete todos los campos, revise las cantidades.', 'error');
+        return false;
+      }
+
+      Swal.fire({
+        title: 'Confirmación',
+        text: `¿Registrar salida de ${descuentos.length} insumo(s)?`,
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Guardar',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#2ea44f',
+        cancelButtonColor: '#d1d5da'
+      }).then((result) => {
+        if (result.isConfirmed) {
+          google.script.run
+            .withSuccessHandler(response => {
+              if (response.success) {
+                Swal.fire('¡Guardado!', 'La salida se registró correctamente.', 'success')
+                  .then(() => {
+                    cargarInsumos();
+                    document.getElementById('formSalida').reset();
+                    establecerFechaActual();
+                  });
+              } else {
+                Swal.fire('Error', response.message || 'Error al guardar los datos', 'error');
+              }
+            })
+            .withFailureHandler(error => {
+              Swal.fire('Error', error.message || 'Error al procesar la solicitud', 'error');
+            })
+            .guardarSalidaInsumoMultiple(datos);
+        }
+      });
+      return false;
+    };
+  </script>
+</body>
+</html>
